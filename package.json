@@ -1,0 +1,20 @@
+{
+  "name": "hookify-cli",
+  "version": "0.1.1",
+  "description": "Sync Git hooks from Hookify",
+  "license": "MIT",
+  "author": "Barney Mayerson",
+  "type": "module",
+  "bin": {
+    "hookify": "src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
