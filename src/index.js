@@ -53,7 +53,7 @@ async function sync() {
   );
 
   if (source === 'none') {
-    // Первый запуск без сети: кэша ещё нет, ставить нечего.
+    // First run with no network: no cache yet, nothing to install.
     log('First-time setup requires internet. Skipping checks.');
     if (error) log(`Reason: ${error.message}`);
     return;
@@ -87,9 +87,10 @@ async function sync() {
 
       log(`${hookName} hook installed (${checks.length} checks).`);
     } else if (removeManagedHook(gitDir, hookName)) {
-      // Раньше тут стоял хук Hookify — теперь для этого типа не включено
-      // ни одного чека. Снимаем сами, а не оставляем невидимо висеть
-      // старую версию с чеками, которые уже выключены в конструкторе.
+      // A Hookify hook used to be here — now no check is enabled for this
+      // type. Remove it ourselves rather than leaving an invisible old
+      // version around with checks that are already disabled in the
+      // constructor.
       log(`${hookName} hook removed (0 checks enabled).`);
     }
   }

@@ -14,7 +14,7 @@ export function readCache(gitDir) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    // Повреждённый кэш эквивалентен его отсутствию.
+    // A corrupted cache is equivalent to no cache at all.
     return null;
   }
 }
@@ -26,14 +26,14 @@ export function writeCache(gitDir, manifest) {
 }
 
 /**
- * Три сценария из дорожной карты:
- *   сеть есть                  -> свежий манифест, обновляем кэш
- *   сети нет, кэш есть         -> тихий fail-open на кэше
- *   сети нет, кэша никогда нет -> пропускаем проверки с явным сообщением
+ * Three scenarios from the roadmap:
+ *   network available                  -> fresh manifest, cache updated
+ *   no network, cache exists            -> silent fail-open on the cache
+ *   no network, cache never existed     -> skip checks with an explicit message
  *
- * Причина сетевой ошибки прокидывается наружу даже в fail-open-сценариях —
- * молчаливое поглощение ошибки не даёт продиагностировать, что случилось
- * (например, недоверенный TLS-сертификат локального .lan-домена).
+ * The underlying network error is surfaced even in fail-open scenarios —
+ * silently swallowing it makes it impossible to diagnose what happened
+ * (e.g. an untrusted TLS certificate on a local .lan domain).
  *
  * @returns {{manifest: object|null, source: 'network'|'cache'|'none', error?: Error}}
  */

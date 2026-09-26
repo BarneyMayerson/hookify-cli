@@ -30,9 +30,10 @@ export function repoRoot(cwd = process.cwd()) {
 const SKIP_DIRS = new Set(['node_modules', 'vendor', '.git', 'dist', 'build']);
 
 /**
- * Ищет package.json/composer.json глубже корня — признак монорепо.
- * v1.0 работает только с одним корневым манифестом; молча делать вид,
- * что всё в порядке, хуже, чем честно сказать "пока не поддерживается".
+ * Looks for package.json/composer.json deeper than the root — a sign of
+ * a monorepo. v1.0 only works with a single root manifest; silently
+ * pretending everything's fine is worse than honestly saying
+ * "not supported yet".
  */
 export function detectMonorepo(root, maxDepth = 3) {
   const found = [];
@@ -60,7 +61,7 @@ export function detectMonorepo(root, maxDepth = 3) {
       try {
         if (statSync(full).isDirectory()) walk(full, depth + 1);
       } catch {
-        // Симлинк в никуда или нет прав — не повод падать.
+        // A dangling symlink or missing permissions — not a reason to crash.
       }
     }
   };
