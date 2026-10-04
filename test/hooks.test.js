@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { decideHookAction, installHook, removeManagedHook, HOOKIFY_MARKER } from '../src/hooks.js';
+import { decideHookAction, installHook, removeManagedHook, renderHook, HOOKIFY_MARKER } from '../src/hooks.js';
 import { resolveManifest, writeCache } from '../src/cache.js';
 
 const checks = [{ id: 'pint', run: 'vendor/bin/pint --dirty --test' }];
@@ -32,6 +32,21 @@ describe('decideHookAction', () => {
 
   test('backs up a foreign hook', () => {
     assert.equal(decideHookAction('#!/bin/sh\nnpx husky\n'), 'backup-and-replace');
+  });
+});
+
+describe('renderHook', () => {
+  test('strips newlines from the project name so it cannot break out of the header comment', () => {
+    const rendered = renderHook('pre-commit', 'Evil\nrm -rf ~\n#', checks);
+
+    assert.match(rendered, /# Project: Evil rm -rf ~ #/);
+    // The injected "command" must not appear as its own line in the script.
+    assert.doesNotMatch(rendered, /^rm -rf ~$/m);
+  });
+
+  test('leaves an ordinary project name untouched', () => {
+    const rendered = renderHook('pre-commit', 'Acme Inc.', checks);
+    assert.match(rendered, /# Project: Acme Inc\.$/m);
   });
 });
 
@@ -76,7 +91,6 @@ describe('installHook', () => {
 
     const content = readFileSync(join(gitDir, 'hooks', 'commit-msg'), 'utf8');
     assert.match(content, /commitlint --edit "\$1"/);
-    // Соседний pre-commit не должен появиться как побочный эффект.
     assert.equal(readdirSync(join(gitDir, 'hooks')).includes('pre-commit'), false);
   });
 });
@@ -94,7 +108,6 @@ describe('removeManagedHook', () => {
 
   test('does nothing when no hook file exists', () => {
     const gitDir = tempGitDir();
-
     assert.equal(removeManagedHook(gitDir, 'commit-msg'), false);
   });
 
@@ -114,7 +127,6 @@ describe('resolveManifest', () => {
   test('uses the network when available', async () => {
     const gitDir = tempGitDir();
     const result = await resolveManifest(gitDir, async () => manifest);
-
     assert.equal(result.source, 'network');
   });
 

@@ -1,12 +1,31 @@
 {
   "name": "hookify-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Sync Git hooks from Hookify",
   "license": "MIT",
-  "author": "Barney Mayerson",
+  "keywords": [
+    "git",
+    "git-hooks",
+    "pre-commit",
+    "commit-msg",
+    "hooks",
+    "linting",
+    "oxlint",
+    "oxfmt",
+    "eslint",
+    "prettier",
+    "cli",
+    "husky-alternative"
+  ],
+  "homepage": "https://github.com/BarneyMayerson/hookify",
+  "bugs": "https://github.com/BarneyMayerson/hookify-cli/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BarneyMayerson/hookify-cli.git"
+  },
   "type": "module",
   "bin": {
-    "hookify": "src/index.js"
+    "hookify": "./src/index.js"
   },
   "files": [
     "src"
