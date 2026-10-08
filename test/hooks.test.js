@@ -4,7 +4,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { decideHookAction, installHook, removeManagedHook, renderHook, HOOKIFY_MARKER } from '../src/hooks.js';
+import {
+  decideHookAction,
+  installHook,
+  removeManagedHook,
+  clearManagedHooks,
+  renderHook,
+  HOOKIFY_MARKER,
+} from '../src/hooks.js';
 import { resolveManifest, writeCache } from '../src/cache.js';
 
 const checks = [{ id: 'pint', run: 'vendor/bin/pint --dirty --test' }];
@@ -120,6 +127,31 @@ describe('removeManagedHook', () => {
 
     assert.equal(removed, false);
     assert.equal(readFileSync(join(gitDir, 'hooks', 'commit-msg'), 'utf8'), original);
+  });
+});
+
+describe('clearManagedHooks', () => {
+  test('removes every Hookify-managed hook and reports which ones', () => {
+    const gitDir = tempGitDir();
+    installHook(gitDir, 'pre-commit', 'Acme', checks);
+    installHook(gitDir, 'commit-msg', 'Acme', [{ id: 'commitlint', run: 'commitlint --edit "$1"' }]);
+
+    const removed = clearManagedHooks(gitDir, ['pre-commit', 'commit-msg']);
+
+    assert.deepEqual(removed.sort(), ['commit-msg', 'pre-commit']);
+    assert.equal(existsSync(join(gitDir, 'hooks', 'pre-commit')), false);
+    assert.equal(existsSync(join(gitDir, 'hooks', 'commit-msg')), false);
+  });
+
+  test('skips hook types with nothing to remove, leaves foreign hooks untouched', () => {
+    const gitDir = tempGitDir();
+    installHook(gitDir, 'pre-commit', 'Acme', checks);
+    writeFileSync(join(gitDir, 'hooks', 'commit-msg'), '#!/bin/sh\nnpx husky\n');
+
+    const removed = clearManagedHooks(gitDir, ['pre-commit', 'commit-msg']);
+
+    assert.deepEqual(removed, ['pre-commit']);
+    assert.equal(existsSync(join(gitDir, 'hooks', 'commit-msg')), true);
   });
 });
 

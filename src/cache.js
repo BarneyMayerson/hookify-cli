@@ -1,10 +1,20 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 const CACHE_FILE = 'manifest.json';
 
 export function cachePath(gitDir) {
   return join(gitDir, 'hookify', CACHE_FILE);
+}
+
+/**
+ * Removes a cached manifest — used when the token behind it is confirmed
+ * dead (401), so a stale manifest for a now-nonexistent project doesn't
+ * keep resurfacing on future offline syncs.
+ */
+export function clearCache(gitDir) {
+  const path = cachePath(gitDir);
+  if (existsSync(path)) unlinkSync(path);
 }
 
 export function readCache(gitDir) {
@@ -14,7 +24,6 @@ export function readCache(gitDir) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    // A corrupted cache is equivalent to no cache at all.
     return null;
   }
 }
@@ -25,18 +34,6 @@ export function writeCache(gitDir, manifest) {
   writeFileSync(path, JSON.stringify(manifest, null, 2), 'utf8');
 }
 
-/**
- * Three scenarios from the roadmap:
- *   network available                  -> fresh manifest, cache updated
- *   no network, cache exists            -> silent fail-open on the cache
- *   no network, cache never existed     -> skip checks with an explicit message
- *
- * The underlying network error is surfaced even in fail-open scenarios —
- * silently swallowing it makes it impossible to diagnose what happened
- * (e.g. an untrusted TLS certificate on a local .lan domain).
- *
- * @returns {{manifest: object|null, source: 'network'|'cache'|'none', error?: Error}}
- */
 export async function resolveManifest(gitDir, fetchManifest) {
   try {
     const manifest = await fetchManifest();

@@ -3,9 +3,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
-import { installHook, removeManagedHook, HOOK_TYPES } from './hooks.js';
-import { resolveManifest } from './cache.js';
+import { installHook, removeManagedHook, clearManagedHooks, HOOK_TYPES } from './hooks.js';
+import { resolveManifest, clearCache } from './cache.js';
 import { resolveGitDir, repoRoot, detectMonorepo } from './repo.js';
+import { fetchManifest, UnauthorizedError } from './api.js';
 import {
   MIGRATION_BRANCH,
   isWorkingTreeClean,
@@ -24,16 +25,6 @@ const log = (msg) => console.log(`[Hookify] ${msg}`);
 
 function readToken() {
   return process.env.HOOKIFY_TOKEN ?? null;
-}
-
-async function fetchManifest(apiBase, token) {
-  const res = await fetch(`${apiBase}/manifest`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-    signal: AbortSignal.timeout(10_000),
-  });
-
-  if (!res.ok) throw new Error(`Manifest request failed: ${res.status}`);
-  return res.json();
 }
 
 async function sync() {
@@ -65,6 +56,22 @@ async function sync() {
   const { manifest, source, error } = await resolveManifest(gitDir, () =>
     fetchManifest(apiBase, token),
   );
+
+  // A dead token (revoked or the project was deleted) is categorically
+  // different from "can't reach the server right now": falling back to
+  // cache would mean silently running stale checks forever for a project
+  // that no longer exists. Instead: stop managing it, tell the user why.
+  if (error instanceof UnauthorizedError) {
+    log('This project token is no longer valid — it may have been revoked or the project deleted.');
+    const removed = clearManagedHooks(gitDir, HOOK_TYPES);
+    clearCache(gitDir);
+    if (removed.length > 0) {
+      log(`Removed the Hookify-managed hook(s): ${removed.join(', ')}.`);
+    }
+    log('Get a fresh HOOKIFY_TOKEN from the project page if it still exists.');
+    process.exitCode = 1;
+    return;
+  }
 
   if (source === 'none') {
     // First run with no network: no cache yet, nothing to install.
@@ -101,10 +108,6 @@ async function sync() {
 
       log(`${hookName} hook installed (${checks.length} checks).`);
     } else if (removeManagedHook(gitDir, hookName)) {
-      // A Hookify hook used to be here — now no check is enabled for this
-      // type. Remove it ourselves rather than leaving an invisible old
-      // version around with checks that are already disabled in the
-      // constructor.
       log(`${hookName} hook removed (0 checks enabled).`);
     }
   }
@@ -121,13 +124,6 @@ async function askYesNo(question) {
   return /^y(es)?$/i.test(answer.trim());
 }
 
-/**
- * Runs locally in the already-checked-out repo — no cloning needed, the
- * CLI already sits where the code is. Step 1 of 2: commits to a local
- * branch and stops there. Pushing + opening the PR is a deliberate manual
- * step for now; automating that needs a GitHub-scoped token the CLI
- * doesn't currently hold, and that's a separate piece of work.
- */
 async function migrate() {
   const root = repoRoot();
 
@@ -189,7 +185,7 @@ async function migrate() {
   }
 
   commitMigration(root);
-  log(`Committed. Next: `);
+  log('Committed. Next:');
   log(`  git push -u origin ${MIGRATION_BRANCH}`);
   log('  ...then open a pull request.');
   log('(Hookify will be able to open the PR for you automatically in a future version.)');

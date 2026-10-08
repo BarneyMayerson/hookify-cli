@@ -74,4 +74,15 @@ export function removeManagedHook(gitDir, hookName) {
 
   unlinkSync(hookPath);
   return true;
-} 
+}
+
+/**
+ * Removes every Hookify-managed hook across the given types — used when
+ * the project's token is confirmed dead (401: revoked or the project was
+ * deleted), so stale hooks don't keep silently running old checks forever.
+ *
+ * @returns {string[]} the hook names that were actually removed
+ */
+export function clearManagedHooks(gitDir, hookTypes) {
+  return hookTypes.filter((hookName) => removeManagedHook(gitDir, hookName));
+}
