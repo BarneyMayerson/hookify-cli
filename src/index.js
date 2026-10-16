@@ -11,11 +11,14 @@ import {
   MIGRATION_BRANCH,
   isWorkingTreeClean,
   currentBranchExists,
+  currentRef,
   createMigrationBranch,
   runEslintMigration,
   runPrettierMigration,
-  diffStat,
+  stageAll,
+  stagedStat,
   commitMigration,
+  rollbackMigration,
 } from './migrate.js';
 
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -124,6 +127,15 @@ async function askYesNo(question) {
   return /^y(es)?$/i.test(answer.trim());
 }
 
+/**
+ * Runs locally in the already-checked-out repo — no cloning needed, the
+ * CLI already sits where the code is. Commits to a local branch and stops
+ * there: pushing + opening the PR is a deliberate manual step for now.
+ *
+ * Any way out other than a confirmed commit (a failing tool, nothing
+ * changed, the user declining) rolls the repository back to where it
+ * started, so the command never leaves a half-finished branch behind.
+ */
 async function migrate() {
   const root = repoRoot();
 
@@ -151,6 +163,18 @@ async function migrate() {
     return;
   }
 
+  const originalRef = currentRef(root);
+
+  const rollback = () => {
+    try {
+      rollbackMigration(root, originalRef);
+      log(`Rolled back: back on ${originalRef}, ${MIGRATION_BRANCH} removed.`);
+    } catch (error) {
+      log(`Automatic rollback failed: ${error.message}`);
+      log(`Clean up by hand: git reset --hard && git checkout ${originalRef} && git branch -D ${MIGRATION_BRANCH}`);
+    }
+  };
+
   log(`Creating branch ${MIGRATION_BRANCH}...`);
   createMigrationBranch(root);
 
@@ -159,6 +183,7 @@ async function migrate() {
     log(runEslintMigration(root).trim());
   } catch (error) {
     log(`ESLint migration failed: ${error.message}`);
+    rollback();
     process.exitCode = 1;
     return;
   }
@@ -168,23 +193,41 @@ async function migrate() {
     log(runPrettierMigration(root).trim());
   } catch (error) {
     log(`Prettier migration failed: ${error.message}`);
+    rollback();
     process.exitCode = 1;
     return;
   }
 
-  log('--- Changes ---');
-  log(diffStat(root).trim());
+  stageAll(root);
+  const stat = stagedStat(root).trim();
 
-  const confirmed = await askYesNo(`Commit these changes to ${MIGRATION_BRANCH}? (y/N) `);
-  if (!confirmed) {
-    log(
-      'Not committed. Review the changes yourself, then `git add -A && git commit`, ' +
-        'or `git checkout -` to discard and go back.',
-    );
+  if (!stat) {
+    log('The migration tools changed nothing — nothing to commit.');
+    rollback();
     return;
   }
 
-  commitMigration(root);
+  log('--- Changes (staged) ---');
+  log(stat);
+
+  const confirmed = await askYesNo(`Commit these changes to ${MIGRATION_BRANCH}? (y/N) `);
+  if (!confirmed) {
+    log('Not committed.');
+    rollback();
+    return;
+  }
+
+  try {
+    commitMigration(root);
+  } catch {
+    // Typically a pre-commit hook rejecting the commit. Keep the staged
+    // work: rolling back here would throw away a finished migration.
+    log(`The commit was rejected (see the output above). The changes are still staged on ${MIGRATION_BRANCH}.`);
+    log('Fix the cause and run `git commit`, or `git commit --no-verify` if a hook is what blocked it.');
+    process.exitCode = 1;
+    return;
+  }
+
   log('Committed. Next:');
   log(`  git push -u origin ${MIGRATION_BRANCH}`);
   log('  ...then open a pull request.');

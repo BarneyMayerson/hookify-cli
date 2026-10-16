@@ -4,20 +4,23 @@ import assert from 'node:assert/strict';
 import {
   isWorkingTreeClean,
   currentBranchExists,
+  currentRef,
   createMigrationBranch,
   runEslintMigration,
   runPrettierMigration,
-  diffStat,
+  stageAll,
+  stagedStat,
   commitMigration,
+  rollbackMigration,
   MIGRATION_BRANCH,
+  COMMIT_MESSAGE,
 } from '../src/migrate.js';
 
-function fakeExec(responses) {
+function fakeExec(responses = {}) {
   const calls = [];
   const exec = (cmd, args) => {
     calls.push([cmd, ...args]);
-    const key = [cmd, ...args].join(' ');
-    const response = responses[key];
+    const response = responses[[cmd, ...args].join(' ')];
     if (response instanceof Error) throw response;
     return response ?? '';
   };
@@ -33,6 +36,11 @@ describe('isWorkingTreeClean', () => {
 
   test('false when there are uncommitted changes', () => {
     const exec = fakeExec({ 'git status --porcelain': ' M file.js\n' });
+    assert.equal(isWorkingTreeClean('/repo', exec), false);
+  });
+
+  test('false when only untracked files exist', () => {
+    const exec = fakeExec({ 'git status --porcelain': '?? scratch.txt\n' });
     assert.equal(isWorkingTreeClean('/repo', exec), false);
   });
 });
@@ -51,9 +59,24 @@ describe('currentBranchExists', () => {
   });
 });
 
+describe('currentRef', () => {
+  test('returns the branch name on a normal checkout', () => {
+    const exec = fakeExec({ 'git rev-parse --abbrev-ref HEAD': 'main\n' });
+    assert.equal(currentRef('/repo', exec), 'main');
+  });
+
+  test('falls back to the commit hash on a detached HEAD', () => {
+    const exec = fakeExec({
+      'git rev-parse --abbrev-ref HEAD': 'HEAD\n',
+      'git rev-parse HEAD': 'abc123\n',
+    });
+    assert.equal(currentRef('/repo', exec), 'abc123');
+  });
+});
+
 describe('migration step runners', () => {
   test('createMigrationBranch checks out the expected branch name', () => {
-    const exec = fakeExec({});
+    const exec = fakeExec();
     createMigrationBranch('/repo', exec);
     assert.deepEqual(exec.calls, [['git', 'checkout', '-b', MIGRATION_BRANCH]]);
   });
@@ -69,18 +92,43 @@ describe('migration step runners', () => {
     });
     assert.equal(runPrettierMigration('/repo', exec), 'Wrote .oxfmtrc.json');
   });
+});
 
-  test('diffStat returns git diff --stat output', () => {
-    const exec = fakeExec({ 'git diff --stat': ' 2 files changed' });
-    assert.equal(diffStat('/repo', exec), ' 2 files changed');
+describe('reviewing and committing', () => {
+  test('stageAll stages everything, including untracked files', () => {
+    const exec = fakeExec();
+    stageAll('/repo', exec);
+    assert.deepEqual(exec.calls, [['git', 'add', '-A']]);
   });
 
-  test('commitMigration stages everything then commits with a fixed message', () => {
-    const exec = fakeExec({});
+  test('stagedStat reads the cached diff, so new files are visible', () => {
+    // `git diff --stat` (unstaged) would print nothing for brand-new files.
+    const exec = fakeExec({ 'git diff --cached --stat': ' .oxlintrc.json | 60 ++++\n' });
+    assert.equal(stagedStat('/repo', exec), ' .oxlintrc.json | 60 ++++\n');
+    assert.deepEqual(exec.calls, [['git', 'diff', '--cached', '--stat']]);
+  });
+
+  test('commitMigration only commits — staging is a separate, earlier step', () => {
+    const exec = fakeExec();
     commitMigration('/repo', exec);
+    assert.deepEqual(exec.calls, [['git', 'commit', '-m', COMMIT_MESSAGE]]);
+  });
+});
+
+describe('rollbackMigration', () => {
+  test('stages, hard-resets, returns to the original ref, then deletes the branch — in that order', () => {
+    const exec = fakeExec();
+    rollbackMigration('/repo', 'main', exec);
     assert.deepEqual(exec.calls, [
       ['git', 'add', '-A'],
-      ['git', 'commit', '-m', 'chore: migrate ESLint + Prettier config to OXC (oxlint/oxfmt)'],
+      ['git', 'reset', '--hard', 'HEAD'],
+      ['git', 'checkout', 'main'],
+      ['git', 'branch', '-D', MIGRATION_BRANCH],
     ]);
+  });
+
+  test('propagates a failure so the caller can print manual cleanup steps', () => {
+    const exec = fakeExec({ 'git checkout main': new Error('checkout failed') });
+    assert.throws(() => rollbackMigration('/repo', 'main', exec), /checkout failed/);
   });
 });
