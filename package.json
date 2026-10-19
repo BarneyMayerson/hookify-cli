@@ -1,6 +1,6 @@
 {
   "name": "hookify-cli",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Sync Git hooks from Hookify",
   "license": "MIT",
   "keywords": [

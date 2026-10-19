@@ -39,17 +39,42 @@ What it does, specifically:
 npx hookify-cli migrate
 ```
 
-If your repo has a flat `eslint.config.js`, this runs [`@oxlint/migrate`](https://www.npmjs.com/package/@oxlint/migrate) and `oxfmt --migrate prettier` against it, shows you a `git diff --stat` summary of what changed (including any rules that couldn't be auto-migrated), and — only if you confirm — commits the result to a new local branch (`hookify/migrate-to-oxc`).
+For a repo with a flat `eslint.config.js`, this does the whole move to [oxlint](https://oxc.rs) and oxfmt on a new local branch (`hookify/migrate-to-oxc`), step by step:
 
-It deliberately stops there: `migrate` never pushes or opens a pull request on its own. Review the branch, then push and open the PR yourself:
+1. Runs [`@oxlint/migrate`](https://www.npmjs.com/package/@oxlint/migrate) on your ESLint config and writes `.oxlintrc.json`. Rules with no oxlint equivalent (many `vue/*` rules, for example) are reported as skipped — review that list.
+2. Runs `oxfmt --migrate prettier` and writes `.oxfmtrc.json` (options, overrides, `.prettierignore` patterns, Tailwind plugin settings).
+3. If your Prettier config used `prettier-plugin-organize-imports` — which oxfmt can't load — turns on oxfmt's built-in `sortImports` so imports stay sorted. Its algorithm is similar to `eslint-plugin-perfectionist`, not TypeScript's `organizeImports`, so some imports may be reordered. An explicit `sortImports` already in the config is left alone.
+4. Installs `oxlint` and `oxfmt` as devDependencies, using your package manager (read from the `packageManager` field or your lockfile: npm, pnpm, yarn or bun). Packages you already depend on are skipped. This runs your package manager for real, including any lifecycle scripts your project defines.
+5. Formats the two generated config files.
+6. Shows exactly what will be committed (the staged changes), and — only if you confirm — commits it.
+
+**What it never does:** push, open a pull request, remove ESLint or Prettier, edit your `package.json` scripts, or reformat your codebase. Do the last one yourself, as a separate commit:
+
+```bash
+npx oxfmt
+```
+
+### Safe to abandon
+
+If you decline, a step fails, or the tools turn out to change nothing, `migrate` rolls back to where you started: you're back on your original branch, the migration branch is deleted, `package.json` and the lockfile are restored, and the generated files are removed. It only touches the files it can create itself (`.oxlintrc.json`, `.oxfmtrc.json`, `package.json` and the lockfiles) — anything else in your working tree is left alone, and it tells you if there is any. Packages it installed stay in `node_modules`; git doesn't track those.
+
+If the commit itself is rejected (for example by a pre-commit hook), the work is *not* thrown away: it stays staged on the migration branch, and you're told how to proceed.
+
+### After the migration
 
 ```bash
 git push -u origin hookify/migrate-to-oxc
 ```
 
-(Automating the push-and-PR step is on the roadmap — it needs a GitHub-scoped token the CLI doesn't hold today, so it's a separate piece of work rather than something bolted on half-safely.)
+Then, before merging:
 
-Requirements for `migrate`: a clean working tree, and a `eslint.config.js` in the repo root (legacy `.eslintrc*` isn't supported yet).
+1. Run `npx oxfmt` and commit the result separately. oxfmt follows Prettier closely but not perfectly, so some files will change.
+2. In the Hookify dashboard, switch the project's checks from ESLint/Prettier to oxlint/oxfmt, then run `hookify sync`. Do this *after* step 1 — the oxfmt check covers the whole repository and would otherwise fail on every commit.
+3. Remove ESLint and Prettier once you're happy with the result.
+
+(Opening the pull request automatically is on the roadmap — it needs a GitHub-scoped token the CLI doesn't hold today, so it's a separate piece of work rather than something bolted on half-safely.)
+
+**Requirements:** a clean working tree (untracked files included), and both `eslint.config.js` and `package.json` in the repository root. The legacy `.eslintrc*` format isn't supported yet.
 
 ## Security notes
 

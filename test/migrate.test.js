@@ -1,5 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   isWorkingTreeClean,
@@ -8,10 +11,18 @@ import {
   createMigrationBranch,
   runEslintMigration,
   runPrettierMigration,
-  stageAll,
+  stageMigrationFiles,
   stagedStat,
   commitMigration,
   rollbackMigration,
+  usedOrganizeImports,
+  enableSortImports,
+  detectPackageManager,
+  installCommand,
+  missingPackages,
+  installOxcPackages,
+  formatGeneratedConfigs,
+  MIGRATION_FILES,
   MIGRATION_BRANCH,
   COMMIT_MESSAGE,
 } from '../src/migrate.js';
@@ -95,10 +106,39 @@ describe('migration step runners', () => {
 });
 
 describe('reviewing and committing', () => {
-  test('stageAll stages everything, including untracked files', () => {
+  test('stageMigrationFiles stages only the files migrate may touch — never `git add -A`', () => {
+    const dir = tempProject({ '.oxlintrc.json': '{}', '.oxfmtrc.json': '{}', 'package.json': '{}' });
+    // check-ignore exits 1 (throws) for files that are NOT ignored.
+    const notIgnored = new Error('not ignored');
+    const exec = fakeExec({
+      'git check-ignore -q -- .oxlintrc.json': notIgnored,
+      'git check-ignore -q -- .oxfmtrc.json': notIgnored,
+      'git check-ignore -q -- package.json': notIgnored,
+    });
+
+    const staged = stageMigrationFiles(dir, exec);
+
+    assert.deepEqual(staged, ['.oxlintrc.json', '.oxfmtrc.json', 'package.json']);
+    const addCall = exec.calls.find((c) => c[1] === 'add');
+    assert.deepEqual(addCall, ['git', 'add', '--', '.oxlintrc.json', '.oxfmtrc.json', 'package.json']);
+    assert.equal(exec.calls.some((c) => c.includes('-A')), false);
+  });
+
+  test('stageMigrationFiles skips gitignored files, which `git add` would reject', () => {
+    const dir = tempProject({ '.oxlintrc.json': '{}', 'yarn.lock': '' });
+    const notIgnored = new Error('not ignored');
+    const exec = fakeExec({
+      'git check-ignore -q -- .oxlintrc.json': notIgnored,
+      // yarn.lock: check-ignore succeeds (exit 0) => it is ignored
+    });
+
+    assert.deepEqual(stageMigrationFiles(dir, exec), ['.oxlintrc.json']);
+  });
+
+  test('stageMigrationFiles runs no `git add` at all when nothing qualifies', () => {
     const exec = fakeExec();
-    stageAll('/repo', exec);
-    assert.deepEqual(exec.calls, [['git', 'add', '-A']]);
+    assert.deepEqual(stageMigrationFiles(tempProject(), exec), []);
+    assert.equal(exec.calls.some((c) => c[1] === 'add'), false);
   });
 
   test('stagedStat reads the cached diff, so new files are visible', () => {
@@ -116,19 +156,175 @@ describe('reviewing and committing', () => {
 });
 
 describe('rollbackMigration', () => {
-  test('stages, hard-resets, returns to the original ref, then deletes the branch — in that order', () => {
+  test('resets tracked files, cleans only the migration paths, returns to the original ref, deletes the branch — in order', () => {
     const exec = fakeExec();
     rollbackMigration('/repo', 'main', exec);
     assert.deepEqual(exec.calls, [
-      ['git', 'add', '-A'],
       ['git', 'reset', '--hard', 'HEAD'],
+      ['git', 'clean', '-f', '--', ...MIGRATION_FILES],
       ['git', 'checkout', 'main'],
       ['git', 'branch', '-D', MIGRATION_BRANCH],
     ]);
   });
 
+  test('never runs a blanket clean or `add -A`, which could delete unrelated files', () => {
+    const exec = fakeExec();
+    rollbackMigration('/repo', 'main', exec);
+
+    const clean = exec.calls.find((c) => c[1] === 'clean');
+    assert.ok(clean.includes('--'), 'clean must be limited to explicit paths');
+    assert.equal(exec.calls.some((c) => c.includes('-A')), false);
+    assert.equal(exec.calls.some((c) => c.includes('-x') || c.includes('-fdx')), false);
+  });
+
   test('propagates a failure so the caller can print manual cleanup steps', () => {
     const exec = fakeExec({ 'git checkout main': new Error('checkout failed') });
     assert.throws(() => rollbackMigration('/repo', 'main', exec), /checkout failed/);
+  });
+});
+
+function tempProject(files = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'hookify-migrate-'));
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(join(dir, name), typeof content === 'string' ? content : JSON.stringify(content));
+  }
+  return dir;
+}
+
+describe('usedOrganizeImports', () => {
+  test('true when the plugin is listed in a Prettier config file', () => {
+    const dir = tempProject({ '.prettierrc': '{"plugins":["prettier-plugin-organize-imports"]}' });
+    assert.equal(usedOrganizeImports(dir), true);
+  });
+
+  test('true when it is listed under the "prettier" key of package.json', () => {
+    const dir = tempProject({
+      'package.json': { prettier: { plugins: ['prettier-plugin-organize-imports'] } },
+    });
+    assert.equal(usedOrganizeImports(dir), true);
+  });
+
+  test('false when the plugin is only a devDependency, not enabled in the config', () => {
+    // Prettier 3 only loads plugins named in its config.
+    const dir = tempProject({
+      'package.json': { devDependencies: { 'prettier-plugin-organize-imports': '^4.0.0' } },
+      '.prettierrc': '{"semi":true}',
+    });
+    assert.equal(usedOrganizeImports(dir), false);
+  });
+
+  test('false with no Prettier config at all', () => {
+    assert.equal(usedOrganizeImports(tempProject()), false);
+  });
+});
+
+describe('enableSortImports', () => {
+  test('adds sortImports: true and keeps the other options', () => {
+    const dir = tempProject({ '.oxfmtrc.json': { singleQuote: true, printWidth: 80 } });
+
+    assert.equal(enableSortImports(dir), 'enabled');
+
+    const config = JSON.parse(readFileSync(join(dir, '.oxfmtrc.json'), 'utf8'));
+    assert.deepEqual(config, { singleQuote: true, printWidth: 80, sortImports: true });
+  });
+
+  test('never overrides an explicit choice', () => {
+    const dir = tempProject({ '.oxfmtrc.json': { sortImports: false } });
+
+    assert.equal(enableSortImports(dir), 'already-set');
+    assert.equal(JSON.parse(readFileSync(join(dir, '.oxfmtrc.json'), 'utf8')).sortImports, false);
+  });
+
+  test('reports a missing config file', () => {
+    assert.equal(enableSortImports(tempProject()), 'missing');
+  });
+
+  test('reports a config it cannot parse instead of clobbering it', () => {
+    const dir = tempProject({ '.oxfmtrc.json': '{ // comment\n "semi": true }' });
+    const before = readFileSync(join(dir, '.oxfmtrc.json'), 'utf8');
+
+    assert.equal(enableSortImports(dir), 'unreadable');
+    assert.equal(readFileSync(join(dir, '.oxfmtrc.json'), 'utf8'), before);
+  });
+});
+
+describe('detectPackageManager', () => {
+  test('defaults to npm with nothing to go on', () => {
+    assert.equal(detectPackageManager(tempProject()), 'npm');
+  });
+
+  test('reads the lockfile', () => {
+    assert.equal(detectPackageManager(tempProject({ 'pnpm-lock.yaml': '' })), 'pnpm');
+    assert.equal(detectPackageManager(tempProject({ 'yarn.lock': '' })), 'yarn');
+    assert.equal(detectPackageManager(tempProject({ 'bun.lockb': '' })), 'bun');
+    assert.equal(detectPackageManager(tempProject({ 'package-lock.json': '{}' })), 'npm');
+  });
+
+  test('the packageManager field wins over a stray lockfile', () => {
+    const dir = tempProject({
+      'package.json': { packageManager: 'pnpm@9.1.0' },
+      'package-lock.json': '{}',
+    });
+    assert.equal(detectPackageManager(dir), 'pnpm');
+  });
+});
+
+describe('installCommand', () => {
+  test('maps each package manager to its dev-dependency install command', () => {
+    const pkgs = ['oxlint', 'oxfmt'];
+    assert.deepEqual(installCommand('npm', pkgs), ['npm', ['install', '-D', 'oxlint', 'oxfmt']]);
+    assert.deepEqual(installCommand('pnpm', pkgs), ['pnpm', ['add', '-D', 'oxlint', 'oxfmt']]);
+    assert.deepEqual(installCommand('yarn', pkgs), ['yarn', ['add', '-D', 'oxlint', 'oxfmt']]);
+    assert.deepEqual(installCommand('bun', pkgs), ['bun', ['add', '-d', 'oxlint', 'oxfmt']]);
+  });
+});
+
+describe('installOxcPackages', () => {
+  test('installs both packages with the detected manager', () => {
+    const dir = tempProject({ 'package.json': {}, 'package-lock.json': '{}' });
+    const exec = fakeExec();
+
+    const result = installOxcPackages(dir, exec);
+
+    assert.deepEqual(result, { installed: ['oxlint', 'oxfmt'], manager: 'npm' });
+    assert.deepEqual(exec.calls, [['npm', 'install', '-D', 'oxlint', 'oxfmt']]);
+  });
+
+  test('only installs what is missing, so existing versions are not bumped', () => {
+    const dir = tempProject({ 'package.json': { devDependencies: { oxlint: '^1.0.0' } } });
+    const exec = fakeExec();
+
+    const result = installOxcPackages(dir, exec);
+
+    assert.deepEqual(result.installed, ['oxfmt']);
+    assert.deepEqual(exec.calls, [['npm', 'install', '-D', 'oxfmt']]);
+  });
+
+  test('does nothing when both are already declared', () => {
+    const dir = tempProject({
+      'package.json': { dependencies: { oxlint: '^1.0.0' }, devDependencies: { oxfmt: '^0.7.0' } },
+    });
+    const exec = fakeExec();
+
+    assert.deepEqual(installOxcPackages(dir, exec), { installed: [], manager: null });
+    assert.deepEqual(exec.calls, []);
+  });
+});
+
+describe('formatGeneratedConfigs', () => {
+  test('formats exactly the generated config files that exist', () => {
+    const dir = tempProject({ '.oxfmtrc.json': '{}', '.oxlintrc.json': '{}' });
+    const exec = fakeExec();
+
+    assert.deepEqual(formatGeneratedConfigs(dir, exec), ['.oxfmtrc.json', '.oxlintrc.json']);
+    assert.deepEqual(exec.calls, [
+      ['npx', '--no-install', 'oxfmt', '.oxfmtrc.json', '.oxlintrc.json'],
+    ]);
+  });
+
+  test('skips the call entirely when neither file exists', () => {
+    const exec = fakeExec();
+    assert.deepEqual(formatGeneratedConfigs(tempProject(), exec), []);
+    assert.deepEqual(exec.calls, []);
   });
 });

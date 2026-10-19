@@ -15,7 +15,11 @@ import {
   createMigrationBranch,
   runEslintMigration,
   runPrettierMigration,
-  stageAll,
+  usedOrganizeImports,
+  enableSortImports,
+  installOxcPackages,
+  formatGeneratedConfigs,
+  stageMigrationFiles,
   stagedStat,
   commitMigration,
   rollbackMigration,
@@ -163,12 +167,23 @@ async function migrate() {
     return;
   }
 
+  if (!existsSync(join(root, 'package.json'))) {
+    log('No package.json found — oxlint and oxfmt need somewhere to be installed.');
+    process.exitCode = 1;
+    return;
+  }
+
   const originalRef = currentRef(root);
 
   const rollback = () => {
     try {
       rollbackMigration(root, originalRef);
       log(`Rolled back: back on ${originalRef}, ${MIGRATION_BRANCH} removed.`);
+      // Only the files migrate itself can create are cleaned up. Say so if
+      // anything else showed up, rather than leave the user guessing.
+      if (!isWorkingTreeClean(root)) {
+        log('Note: some other changes in the working tree were left untouched (see `git status`).');
+      }
     } catch (error) {
       log(`Automatic rollback failed: ${error.message}`);
       log(`Clean up by hand: git reset --hard && git checkout ${originalRef} && git branch -D ${MIGRATION_BRANCH}`);
@@ -198,8 +213,48 @@ async function migrate() {
     return;
   }
 
-  stageAll(root);
-  const stat = stagedStat(root).trim();
+  // oxfmt can't load Prettier plugins, so organize-imports would be lost
+  // silently. Its built-in sortImports is the closest replacement.
+  if (usedOrganizeImports(root)) {
+    const result = enableSortImports(root);
+    if (result === 'enabled') {
+      log('prettier-plugin-organize-imports was in use — enabled oxfmt "sortImports" to keep imports sorted.');
+    } else if (result !== 'already-set') {
+      log(`Could not enable "sortImports" automatically (${result} .oxfmtrc.json) — add \`"sortImports": true\` yourself.`);
+    }
+  }
+
+  try {
+    const { installed, manager } = installOxcPackages(root);
+    if (installed.length > 0) {
+      log(`Installed ${installed.join(' + ')} as devDependencies (${manager}).`);
+    } else {
+      log('oxlint and oxfmt are already installed.');
+    }
+  } catch (error) {
+    log(`Installing oxlint/oxfmt failed: ${error.message}`);
+    rollback();
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    formatGeneratedConfigs(root);
+  } catch (error) {
+    // Cosmetic: the user can still format these by hand.
+    log(`Could not format the generated config files (${error.message}) — run \`npx oxfmt\` on them.`);
+  }
+
+  let stat;
+  try {
+    stageMigrationFiles(root);
+    stat = stagedStat(root).trim();
+  } catch (error) {
+    log(`Could not stage the migration changes: ${error.message}`);
+    rollback();
+    process.exitCode = 1;
+    return;
+  }
 
   if (!stat) {
     log('The migration tools changed nothing — nothing to commit.');
@@ -228,9 +283,13 @@ async function migrate() {
     return;
   }
 
-  log('Committed. Next:');
+  log('Committed. Before you merge:');
+  log('  1. Format the codebase with `npx oxfmt` and commit that separately — your formatting may');
+  log('     shift slightly (imports can be reordered if sortImports is on).');
+  log('  2. Switch this project\'s checks to oxlint/oxfmt in the Hookify dashboard, then `hookify sync`.');
+  log('  3. ESLint and Prettier are left installed — remove them once you are happy with the result.');
+  log('Then publish the branch:');
   log(`  git push -u origin ${MIGRATION_BRANCH}`);
-  log('  ...then open a pull request.');
   log('(Hookify will be able to open the PR for you automatically in a future version.)');
 }
 
